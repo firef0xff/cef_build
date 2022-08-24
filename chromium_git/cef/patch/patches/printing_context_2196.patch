@@ -1,0 +1,41 @@
+diff --git chrome/browser/printing/print_job_worker.cc chrome/browser/printing/print_job_worker.cc
+index ee713c5686d4e..67eaba056cbed 100644
+--- chrome/browser/printing/print_job_worker.cc
++++ chrome/browser/printing/print_job_worker.cc
+@@ -131,6 +131,7 @@ PrintJobWorker::PrintJobWorker(content::GlobalRenderFrameHostId rfh_id)
+                                   ShouldPrintingContextSkipSystemCalls())),
+       thread_("Printing_Worker") {
+   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
++  printing_context_->set_render_ids(rfh_id.child_id, rfh_id.frame_routing_id);
+ }
+ 
+ PrintJobWorker::~PrintJobWorker() {
+diff --git printing/printing_context.h printing/printing_context.h
+index 58fcf619add50..0df47b93afd05 100644
+--- printing/printing_context.h
++++ printing/printing_context.h
+@@ -173,6 +173,13 @@ class COMPONENT_EXPORT(PRINTING) PrintingContext {
+ 
+   int job_id() const { return job_id_; }
+ 
++  void set_render_ids(int render_process_id, int render_frame_id) {
++    render_process_id_ = render_process_id;
++    render_frame_id_ = render_frame_id;
++  }
++  int render_process_id() const { return render_process_id_; }
++  int render_frame_id() const { return render_frame_id_; }
++
+  protected:
+   explicit PrintingContext(Delegate* delegate);
+ 
+@@ -217,6 +224,10 @@ class COMPONENT_EXPORT(PRINTING) PrintingContext {
+   // The job id for the current job. The value is 0 if no jobs are active.
+   int job_id_;
+ 
++  // Routing IDs for the frame that owns this object.
++  int render_process_id_ = 0;
++  int render_frame_id_ = 0;
++
+  private:
+ #if BUILDFLAG(ENABLE_OOP_PRINTING)
+   // If this instance of PrintingContext should skip making any system calls

@@ -1,0 +1,31 @@
+diff --git chrome/browser/BUILD.gn chrome/browser/BUILD.gn
+index 817539af42794..57c9def28ff59 100644
+--- chrome/browser/BUILD.gn
++++ chrome/browser/BUILD.gn
+@@ -11,6 +11,7 @@ import("//build/config/compiler/pgo/pgo.gni")
+ import("//build/config/features.gni")
+ import("//build/config/python.gni")
+ import("//build/config/ui.gni")
++import("//cef/libcef/features/features.gni")
+ import("//chrome/browser/buildflags.gni")
+ import("//chrome/browser/downgrade/buildflags.gni")
+ import("//chrome/common/features.gni")
+@@ -1955,6 +1956,7 @@ static_library("browser") {
+     "//build:chromeos_buildflags",
+     "//build/config/compiler:compiler_buildflags",
+     "//cc",
++    "//cef/libcef/features",
+     "//chrome:extra_resources",
+     "//chrome:resources",
+     "//chrome:strings",
+@@ -2631,6 +2633,10 @@ static_library("browser") {
+     deps += [ "//chrome/browser/ui/webui/connectors_internals:mojo_bindings" ]
+   }
+ 
++  if (enable_cef) {
++    configs += [ "//cef/libcef/features:config" ]
++  }
++
+   if (is_android) {
+     sources += [
+       "after_startup_task_utils_android.cc",

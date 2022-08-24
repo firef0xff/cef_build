@@ -1,0 +1,510 @@
+diff --git chrome/browser/ui/browser_command_controller.cc chrome/browser/ui/browser_command_controller.cc
+index 6e04b7de772c7..70da576aa5086 100644
+--- chrome/browser/ui/browser_command_controller.cc
++++ chrome/browser/ui/browser_command_controller.cc
+@@ -382,8 +382,10 @@ bool BrowserCommandController::ExecuteCommandWithDisposition(
+   // CommandUpdaterDelegate and CommandUpdater declare this function so we
+   // choose to not implement CommandUpdaterDelegate inside this class and
+   // therefore command_updater_ doesn't have the delegate set).
+-  if (!SupportsCommand(id) || !IsCommandEnabled(id))
++  if (!SupportsCommand(id) || !IsCommandEnabled(id)) {
++    LOG(WARNING) << "Invalid/disabled command " << id;
+     return false;
++  }
+ 
+   // No commands are enabled if there is not yet any selected tab.
+   // TODO(pkasting): It seems like we should not need this, because either
+@@ -398,6 +400,13 @@ bool BrowserCommandController::ExecuteCommandWithDisposition(
+   DCHECK(command_updater_.IsCommandEnabled(id))
+       << "Invalid/disabled command " << id;
+ 
++#if BUILDFLAG(ENABLE_CEF)
++  if (browser_->cef_delegate() &&
++      browser_->cef_delegate()->HandleCommand(id, disposition)) {
++    return true;
++  }
++#endif
++
+   // The order of commands in this switch statement must match the function
+   // declaration order in browser.h!
+   switch (id) {
+@@ -1032,11 +1041,13 @@ void BrowserCommandController::TabRestoreServiceLoaded(
+ // BrowserCommandController, private:
+ 
+ bool BrowserCommandController::IsShowingMainUI() {
+-  return browser_->SupportsWindowFeature(Browser::FEATURE_TABSTRIP);
++  return browser_->SupportsWindowFeature(Browser::FEATURE_TABSTRIP) ||
++         browser_->toolbar_overridden();
+ }
+ 
+ bool BrowserCommandController::IsShowingLocationBar() {
+-  return browser_->SupportsWindowFeature(Browser::FEATURE_LOCATIONBAR);
++  return browser_->SupportsWindowFeature(Browser::FEATURE_LOCATIONBAR) ||
++         browser_->toolbar_overridden();
+ }
+ 
+ bool BrowserCommandController::IsWebAppOrCustomTab() const {
+diff --git chrome/browser/ui/views/frame/browser_frame.cc chrome/browser/ui/views/frame/browser_frame.cc
+index 0d4c12f0f72de..dc09323bdf482 100644
+--- chrome/browser/ui/views/frame/browser_frame.cc
++++ chrome/browser/ui/views/frame/browser_frame.cc
+@@ -74,15 +74,23 @@ bool IsUsingGtkTheme(Profile* profile) {
+ ////////////////////////////////////////////////////////////////////////////////
+ // BrowserFrame, public:
+ 
++BrowserFrame::BrowserFrame() : BrowserFrame(nullptr) {}
++
+ BrowserFrame::BrowserFrame(BrowserView* browser_view)
+     : native_browser_frame_(nullptr),
+       root_view_(nullptr),
+       browser_frame_view_(nullptr),
+-      browser_view_(browser_view) {
+-  browser_view_->set_frame(this);
++      browser_view_(nullptr) {
+   set_is_secondary_widget(false);
+   // Don't focus anything on creation, selecting a tab will set the focus.
+   set_focus_on_creation(false);
++  if (browser_view)
++    InitBrowserView(browser_view);
++}
++
++void BrowserFrame::InitBrowserView(BrowserView* browser_view) {
++  browser_view_ = browser_view;
++  browser_view_->set_frame(this);
+ }
+ 
+ BrowserFrame::~BrowserFrame() {}
+@@ -152,6 +160,12 @@ gfx::Rect BrowserFrame::GetBoundsForTabStripRegion(
+ }
+ 
+ int BrowserFrame::GetTopInset() const {
++  if (!browser_frame_view_) {
++    // With CEF the browser may already be part of a larger Views layout. Zero
++    // out the adjustment in BrowserView::GetTopInsetInBrowserView() so that
++    // the browser isn't shifted to the top of the window.
++    return browser_view_->y();
++  }
+   return browser_frame_view_->GetTopInset(false);
+ }
+ 
+@@ -181,20 +195,30 @@ bool BrowserFrame::ShouldDrawFrameHeader() const {
+ 
+ void BrowserFrame::GetWindowPlacement(gfx::Rect* bounds,
+                                       ui::WindowShowState* show_state) const {
++  if (!native_browser_frame_) {
++    *show_state = ui::SHOW_STATE_DEFAULT;
++    return;
++  }
+   return native_browser_frame_->GetWindowPlacement(bounds, show_state);
+ }
+ 
+ content::KeyboardEventProcessingResult BrowserFrame::PreHandleKeyboardEvent(
+     const content::NativeWebKeyboardEvent& event) {
++  if (!native_browser_frame_)
++    return content::KeyboardEventProcessingResult::NOT_HANDLED;
+   return native_browser_frame_->PreHandleKeyboardEvent(event);
+ }
+ 
+ bool BrowserFrame::HandleKeyboardEvent(
+     const content::NativeWebKeyboardEvent& event) {
++  if (!native_browser_frame_)
++    return false;
+   return native_browser_frame_->HandleKeyboardEvent(event);
+ }
+ 
+ void BrowserFrame::OnBrowserViewInitViewsComplete() {
++  if (!browser_frame_view_)
++    return;
+   browser_frame_view_->OnBrowserViewInitViewsComplete();
+ }
+ 
+@@ -255,6 +279,8 @@ const ui::ThemeProvider* BrowserFrame::GetThemeProvider() const {
+ 
+ ui::ColorProviderManager::ThemeInitializerSupplier*
+ BrowserFrame::GetCustomTheme() const {
++  if (!browser_view_)
++    return nullptr;
+   Browser* browser = browser_view_->browser();
+   // If this is an incognito profile, there should never be a custom theme.
+   if (browser->profile()->IsIncognitoProfile())
+@@ -272,6 +298,8 @@ BrowserFrame::GetCustomTheme() const {
+ }
+ 
+ void BrowserFrame::OnNativeWidgetWorkspaceChanged() {
++  if (!browser_view_)
++    return;
+   chrome::SaveWindowWorkspace(browser_view_->browser(), GetWorkspace());
+   chrome::SaveWindowVisibleOnAllWorkspaces(browser_view_->browser(),
+                                            IsVisibleOnAllWorkspaces());
+@@ -361,6 +389,8 @@ void BrowserFrame::SetTabDragKind(TabDragKind tab_drag_kind) {
+ 
+ ui::ColorProviderManager::Key BrowserFrame::GetColorProviderKey() const {
+   auto key = Widget::GetColorProviderKey();
++  if (!browser_view_)
++    return key;
+   auto* app_controller = browser_view_->browser()->app_controller();
+   key.app_controller =
+       app_controller ? app_controller->get_weak_ref() : nullptr;
+@@ -391,7 +421,8 @@ void BrowserFrame::SelectNativeTheme() {
+   // Select between regular, dark and GTK theme.
+   ui::NativeTheme* native_theme = ui::NativeTheme::GetInstanceForNativeUi();
+ 
+-  if (browser_view_->browser()->profile()->IsIncognitoProfile()) {
++  if (browser_view_ &&
++      browser_view_->browser()->profile()->IsIncognitoProfile()) {
+     // No matter if we are using the default theme or not we always use the dark
+     // ui instance.
+     SetNativeTheme(ui::NativeTheme::GetInstanceForDarkUI());
+@@ -404,7 +435,8 @@ void BrowserFrame::SelectNativeTheme() {
+   // display_override so the web contents can blend with the overlay by using
+   // the developer-provided theme color for a better experience. Context:
+   // https://crbug.com/1219073.
+-  if (linux_ui && !browser_view_->AppUsesWindowControlsOverlay()) {
++  if (linux_ui &&
++      (!browser_view_ || !browser_view_->AppUsesWindowControlsOverlay())) {
+     native_theme = linux_ui->GetNativeTheme(GetNativeWindow());
+   }
+ #endif
+diff --git chrome/browser/ui/views/frame/browser_frame.h chrome/browser/ui/views/frame/browser_frame.h
+index 9bd586697dece..80ef1f08cb463 100644
+--- chrome/browser/ui/views/frame/browser_frame.h
++++ chrome/browser/ui/views/frame/browser_frame.h
+@@ -53,7 +53,9 @@ enum class TabDragKind {
+ // This is a virtual interface that allows system specific browser frames.
+ class BrowserFrame : public views::Widget, public views::ContextMenuController {
+  public:
++  BrowserFrame();
+   explicit BrowserFrame(BrowserView* browser_view);
++  void InitBrowserView(BrowserView* browser_view);
+ 
+   BrowserFrame(const BrowserFrame&) = delete;
+   BrowserFrame& operator=(const BrowserFrame&) = delete;
+diff --git chrome/browser/ui/views/frame/browser_view.cc chrome/browser/ui/views/frame/browser_view.cc
+index dadd1e5ac9dcd..db1f1f6bb30b8 100644
+--- chrome/browser/ui/views/frame/browser_view.cc
++++ chrome/browser/ui/views/frame/browser_view.cc
+@@ -303,11 +303,10 @@ using content::WebContents;
+ using views::ColumnSet;
+ using web_modal::WebContentsModalDialogHost;
+ 
+-namespace {
++// static
++const char BrowserView::kBrowserViewKey[] = "__BROWSER_VIEW__";
+ 
+-// The name of a key to store on the window handle so that other code can
+-// locate this object using just the handle.
+-const char* const kBrowserViewKey = "__BROWSER_VIEW__";
++namespace {
+ 
+ #if BUILDFLAG(IS_CHROMEOS_ASH)
+ // UMA histograms that record animation smoothness for tab loading animation.
+@@ -799,11 +798,22 @@ class BrowserView::SidePanelVisibilityController : public views::ViewObserver {
+ ///////////////////////////////////////////////////////////////////////////////
+ // BrowserView, public:
+ 
++BrowserView::BrowserView() : BrowserView(nullptr) {}
++
+ BrowserView::BrowserView(std::unique_ptr<Browser> browser)
+     : views::ClientView(nullptr, nullptr),
+-      browser_(std::move(browser)),
+       accessibility_mode_observer_(
+           std::make_unique<AccessibilityModeObserver>(this)) {
++  if (browser)
++    InitBrowser(std::move(browser));
++}
++
++void BrowserView::InitBrowser(std::unique_ptr<Browser> browser) {
++  DCHECK(!browser_);
++  browser_ = std::move(browser);
++
++  immersive_mode_controller_ = chrome::CreateImmersiveModeController();
++
+   SetShowIcon(
+       ::ShouldShowWindowIcon(browser_.get(), AppUsesWindowControlsOverlay()));
+ 
+@@ -845,7 +855,6 @@ BrowserView::BrowserView(std::unique_ptr<Browser> browser)
+   }
+ 
+   browser_->tab_strip_model()->AddObserver(this);
+-  immersive_mode_controller_ = chrome::CreateImmersiveModeController();
+ 
+   // Top container holds tab strip region and toolbar and lives at the front of
+   // the view hierarchy.
+@@ -888,8 +897,15 @@ BrowserView::BrowserView(std::unique_ptr<Browser> browser)
+   contents_container->SetLayoutManager(std::make_unique<ContentsLayoutManager>(
+       devtools_web_view_, contents_web_view_));
+ 
+-  toolbar_ = top_container_->AddChildView(
+-      std::make_unique<ToolbarView>(browser_.get(), this));
++  toolbar_ = OverrideCreateToolbar(browser_.get(), this);
++  if (!toolbar_) {
++    toolbar_ = new ToolbarView(browser_.get(), this, absl::nullopt);
++  } else {
++    browser_->set_toolbar_overridden(true);
++    // Update state that depends on the above flag.
++    browser_->command_controller()->FullscreenStateChanged();
++  }
++  top_container_->AddChildView(base::WrapUnique(toolbar_.get()));
+ 
+   contents_separator_ =
+       top_container_->AddChildView(std::make_unique<ContentsSeparator>());
+@@ -1776,6 +1792,8 @@ bool BrowserView::ShouldHideUIForFullscreen() const {
+   if (immersive_mode_controller_->IsEnabled())
+     return false;
+ 
++  if (!frame_->GetFrameView())
++    return false;
+   return frame_->GetFrameView()->ShouldHideTopUIForFullscreen();
+ }
+ 
+@@ -2995,7 +3013,8 @@ BrowserView::GetNativeViewHostsForTopControlsSlide() const {
+ }
+ 
+ void BrowserView::ReparentTopContainerForEndOfImmersive() {
+-  overlay_view_->SetVisible(false);
++  if (overlay_view_)
++    overlay_view_->SetVisible(false);
+   top_container()->DestroyLayer();
+   AddChildViewAt(top_container(), 0);
+   EnsureFocusOrder();
+@@ -3532,8 +3551,10 @@ void BrowserView::Layout() {
+ 
+   // TODO(jamescook): Why was this in the middle of layout code?
+   toolbar_->location_bar()->omnibox_view()->SetFocusBehavior(
+-      IsToolbarVisible() ? FocusBehavior::ALWAYS : FocusBehavior::NEVER);
+-  frame()->GetFrameView()->UpdateMinimumSize();
++      (IsToolbarVisible() || browser_->toolbar_overridden()) ?
++          FocusBehavior::ALWAYS : FocusBehavior::NEVER);
++  if (frame()->GetFrameView())
++    frame()->GetFrameView()->UpdateMinimumSize();
+ 
+   // Some of the situations when the BrowserView is laid out are:
+   // - Enter/exit immersive fullscreen mode.
+@@ -3599,6 +3620,11 @@ void BrowserView::AddedToWidget() {
+   SetThemeProfileForWindow(GetNativeWindow(), browser_->profile());
+ #endif
+ 
++  // This browser view may already have a custom button provider set (e.g the
++  // hosted app frame).
++  if (!toolbar_button_provider_)
++    SetToolbarButtonProvider(toolbar_);
++
+   toolbar_->Init();
+ 
+   // TODO(pbos): Manage this either inside SidePanel or the corresponding button
+@@ -3660,13 +3686,9 @@ void BrowserView::AddedToWidget() {
+ 
+   EnsureFocusOrder();
+ 
+-  // This browser view may already have a custom button provider set (e.g the
+-  // hosted app frame).
+-  if (!toolbar_button_provider_)
+-    SetToolbarButtonProvider(toolbar_);
+-
+   frame_->OnBrowserViewInitViewsComplete();
+-  frame_->GetFrameView()->UpdateMinimumSize();
++  if (frame_->GetFrameView())
++    frame_->GetFrameView()->UpdateMinimumSize();
+   using_native_frame_ = frame_->ShouldUseNativeFrame();
+ 
+   MaybeInitializeWebUITabStrip();
+@@ -4074,7 +4096,8 @@ void BrowserView::ProcessFullscreen(bool fullscreen,
+   // Undo our anti-jankiness hacks and force a re-layout.
+   in_process_fullscreen_ = false;
+   ToolbarSizeChanged(false);
+-  frame_->GetFrameView()->OnFullscreenStateChanged();
++  if (frame_->GetFrameView())
++    frame_->GetFrameView()->OnFullscreenStateChanged();
+ }
+ 
+ bool BrowserView::ShouldUseImmersiveFullscreenForUrl(const GURL& url) const {
+@@ -4403,6 +4426,8 @@ Profile* BrowserView::GetProfile() {
+ }
+ 
+ void BrowserView::UpdateUIForTabFullscreen() {
++  if (!frame_->GetFrameView())
++    return;
+   frame()->GetFrameView()->UpdateFullscreenTopUI();
+ }
+ 
+@@ -4425,6 +4450,8 @@ void BrowserView::HideDownloadShelf() {
+ }
+ 
+ bool BrowserView::CanUserExitFullscreen() const {
++  if (!frame_->GetFrameView())
++    return true;
+   return frame_->GetFrameView()->CanUserExitFullscreen();
+ }
+ 
+diff --git chrome/browser/ui/views/frame/browser_view.h chrome/browser/ui/views/frame/browser_view.h
+index ddfe2de1b7cd5..eb776e91a2a2b 100644
+--- chrome/browser/ui/views/frame/browser_view.h
++++ chrome/browser/ui/views/frame/browser_view.h
+@@ -124,11 +124,16 @@ class BrowserView : public BrowserWindow,
+                     public webapps::AppBannerManager::Observer {
+  public:
+   METADATA_HEADER(BrowserView);
++  BrowserView();
+   explicit BrowserView(std::unique_ptr<Browser> browser);
++  void InitBrowser(std::unique_ptr<Browser> browser);
+   BrowserView(const BrowserView&) = delete;
+   BrowserView& operator=(const BrowserView&) = delete;
+   ~BrowserView() override;
+ 
++  // Key used to bind BrowserView to the Widget with which it is associated.
++  static const char kBrowserViewKey[];
++
+   void set_frame(BrowserFrame* frame) { frame_ = frame; }
+   BrowserFrame* frame() const { return frame_; }
+ 
+@@ -736,6 +741,12 @@ class BrowserView : public BrowserWindow,
+   void MaybeRestoreSideSearchStatePerWindow(
+       const std::map<std::string, std::string>& extra_data) override;
+ 
++ protected:
++  virtual ToolbarView* OverrideCreateToolbar(Browser* browser,
++                                             BrowserView* browser_view) {
++    return nullptr;
++  }
++
+  private:
+   // Do not friend BrowserViewLayout. Use the BrowserViewLayoutDelegate
+   // interface to keep these two classes decoupled and testable.
+diff --git chrome/browser/ui/views/frame/browser_view_layout.cc chrome/browser/ui/views/frame/browser_view_layout.cc
+index 1db5f517e7bfb..981b4321f6aa9 100644
+--- chrome/browser/ui/views/frame/browser_view_layout.cc
++++ chrome/browser/ui/views/frame/browser_view_layout.cc
+@@ -42,6 +42,10 @@
+ #include "ui/views/widget/widget.h"
+ #include "ui/views/window/client_view.h"
+ 
++#if BUILDFLAG(ENABLE_CEF)
++#include "cef/libcef/browser/chrome/views/chrome_views_util.h"
++#endif
++
+ using views::View;
+ using web_modal::WebContentsModalDialogHost;
+ using web_modal::ModalDialogHostObserver;
+@@ -463,6 +467,11 @@ int BrowserViewLayout::LayoutWebUITabStrip(int top) {
+ 
+ int BrowserViewLayout::LayoutToolbar(int top) {
+   TRACE_EVENT0("ui", "BrowserViewLayout::LayoutToolbar");
++  if (cef::IsCefView(toolbar_)) {
++    // CEF may take ownership of the toolbar. Early exit to avoid the DCHECK
++    // in LayoutManager::SetViewVisibility().
++    return top;
++  }
+   int browser_view_width = vertical_layout_rect_.width();
+   bool toolbar_visible = delegate_->IsToolbarVisible();
+   int height = toolbar_visible ? toolbar_->GetPreferredSize().height() : 0;
+diff --git chrome/browser/ui/views/frame/contents_web_view.cc chrome/browser/ui/views/frame/contents_web_view.cc
+index bc047256f110a..b6bc9dfc0eee5 100644
+--- chrome/browser/ui/views/frame/contents_web_view.cc
++++ chrome/browser/ui/views/frame/contents_web_view.cc
+@@ -26,6 +26,11 @@
+ ContentsWebView::ContentsWebView(content::BrowserContext* browser_context)
+     : views::WebView(browser_context),
+       status_bubble_(nullptr) {
++  // Mouse events on draggable regions will not be handled by the WebView.
++  // Avoid the resulting DCHECK in NativeViewHost::OnMousePressed by
++  // configuring the NativeViewHost not to process events via the view
++  // hierarchy.
++  holder()->SetCanProcessEventsWithinSubtree(false);
+ }
+ 
+ ContentsWebView::~ContentsWebView() {
+diff --git chrome/browser/ui/views/tabs/browser_tab_strip_controller.cc chrome/browser/ui/views/tabs/browser_tab_strip_controller.cc
+index 7475765f4b514..25c59d942782b 100644
+--- chrome/browser/ui/views/tabs/browser_tab_strip_controller.cc
++++ chrome/browser/ui/views/tabs/browser_tab_strip_controller.cc
+@@ -551,33 +551,47 @@ gfx::Range BrowserTabStripController::ListTabsInGroup(
+ }
+ 
+ bool BrowserTabStripController::IsFrameCondensed() const {
++  if (!GetFrameView())
++    return false;
+   return GetFrameView()->IsFrameCondensed();
+ }
+ 
+ bool BrowserTabStripController::HasVisibleBackgroundTabShapes() const {
++  if (!GetFrameView())
++    return false;
+   return GetFrameView()->HasVisibleBackgroundTabShapes(
+       BrowserFrameActiveState::kUseCurrent);
+ }
+ 
+ bool BrowserTabStripController::EverHasVisibleBackgroundTabShapes() const {
++  if (!GetFrameView())
++    return false;
+   return GetFrameView()->EverHasVisibleBackgroundTabShapes();
+ }
+ 
+ bool BrowserTabStripController::ShouldPaintAsActiveFrame() const {
++  if (!GetFrameView())
++    return false;
+   return GetFrameView()->ShouldPaintAsActive();
+ }
+ 
+ bool BrowserTabStripController::CanDrawStrokes() const {
++  if (!GetFrameView())
++    return false;
+   return GetFrameView()->CanDrawStrokes();
+ }
+ 
+ SkColor BrowserTabStripController::GetFrameColor(
+     BrowserFrameActiveState active_state) const {
++  if (!GetFrameView())
++    return SK_ColorWHITE;
+   return GetFrameView()->GetFrameColor(active_state);
+ }
+ 
+ absl::optional<int> BrowserTabStripController::GetCustomBackgroundId(
+     BrowserFrameActiveState active_state) const {
++  if (!GetFrameView())
++    return absl::nullopt;
+   return GetFrameView()->GetCustomBackgroundId(active_state);
+ }
+ 
+diff --git chrome/browser/ui/views/toolbar/toolbar_view.cc chrome/browser/ui/views/toolbar/toolbar_view.cc
+index b5ba130e6ed00..cbe6e5744d689 100644
+--- chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -168,12 +168,13 @@ auto& GetViewCommandMap() {
+ ////////////////////////////////////////////////////////////////////////////////
+ // ToolbarView, public:
+ 
+-ToolbarView::ToolbarView(Browser* browser, BrowserView* browser_view)
++ToolbarView::ToolbarView(Browser* browser, BrowserView* browser_view,
++                         absl::optional<DisplayMode> display_mode)
+     : AnimationDelegateViews(this),
+       browser_(browser),
+       browser_view_(browser_view),
+       app_menu_icon_controller_(browser->profile(), this),
+-      display_mode_(GetDisplayMode(browser)) {
++      display_mode_(display_mode ? *display_mode : GetDisplayMode(browser)) {
+   SetID(VIEW_ID_TOOLBAR);
+ 
+   UpgradeDetector::GetInstance()->AddObserver(this);
+@@ -208,7 +209,7 @@ void ToolbarView::Init() {
+ #endif
+   auto location_bar = std::make_unique<LocationBarView>(
+       browser_, browser_->profile(), browser_->command_controller(), this,
+-      display_mode_ != DisplayMode::NORMAL);
++      display_mode_ != DisplayMode::NORMAL && !browser_->toolbar_overridden());
+   // Make sure the toolbar shows by default.
+   size_animation_.Reset(1);
+ 
+diff --git chrome/browser/ui/views/toolbar/toolbar_view.h chrome/browser/ui/views/toolbar/toolbar_view.h
+index 9eb9688bb442b..9d20d3d262588 100644
+--- chrome/browser/ui/views/toolbar/toolbar_view.h
++++ chrome/browser/ui/views/toolbar/toolbar_view.h
+@@ -94,7 +94,8 @@ class ToolbarView : public views::AccessiblePaneView,
+                 // needs to be displayed.
+   };
+ 
+-  ToolbarView(Browser* browser, BrowserView* browser_view);
++  ToolbarView(Browser* browser, BrowserView* browser_view,
++              absl::optional<DisplayMode> display_mode);
+   ToolbarView(const ToolbarView&) = delete;
+   ToolbarView& operator=(const ToolbarView&) = delete;
+   ~ToolbarView() override;

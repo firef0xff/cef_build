@@ -1,0 +1,5 @@
+-vpython-spec src/.vpython -vpython-tool install from /Users/ma.chistov/cef/code/chromium_git/chromium
+-vpython-spec src/.vpython -vpython-tool install from /Users/ma.chistov/cef/code/chromium_git/chromium
+-vpython-spec src/.vpython -vpython-tool install from /Users/ma.chistov/cef/code/chromium_git/chromium
+-vpython-spec src/.vpython -vpython-tool install from /Users/ma.chistov/cef/code/chromium_git/chromium
+-vpython-spec src/.vpython -vpython-tool install from /Users/ma.chistov/cef/code/chromium_git/chromium

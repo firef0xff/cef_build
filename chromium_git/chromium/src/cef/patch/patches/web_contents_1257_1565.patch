@@ -1,0 +1,145 @@
+diff --git content/browser/web_contents/web_contents_impl.cc content/browser/web_contents/web_contents_impl.cc
+index 452062e8b570e..83fbdb1175ec2 100644
+--- content/browser/web_contents/web_contents_impl.cc
++++ content/browser/web_contents/web_contents_impl.cc
+@@ -3026,6 +3026,12 @@ void WebContentsImpl::Init(const WebContents::CreateParams& params,
+       site_instance.get(), params.renderer_initiated_creation,
+       params.main_frame_name, GetOpener(), primary_main_frame_policy);
+ 
++  if (params.view && params.delegate_view) {
++    view_.reset(params.view);
++    render_view_host_delegate_view_ = params.delegate_view;
++  }
++
++  if (!view_) {
+   std::unique_ptr<WebContentsViewDelegate> delegate =
+       GetContentClient()->browser()->GetWebContentsViewDelegate(this);
+ 
+@@ -3036,6 +3042,7 @@ void WebContentsImpl::Init(const WebContents::CreateParams& params,
+     view_ = CreateWebContentsView(this, std::move(delegate),
+                                   &render_view_host_delegate_view_);
+   }
++  }
+   CHECK(render_view_host_delegate_view_);
+   CHECK(view_.get());
+ 
+@@ -3214,6 +3221,9 @@ void WebContentsImpl::RenderWidgetCreated(
+   OPTIONAL_TRACE_EVENT1("content", "WebContentsImpl::RenderWidgetCreated",
+                         "render_widget_host", render_widget_host);
+   created_widgets_.insert(render_widget_host);
++
++  observers_.NotifyObservers(
++      &WebContentsObserver::RenderWidgetCreated, render_widget_host);
+ }
+ 
+ void WebContentsImpl::RenderWidgetDeleted(
+@@ -3912,6 +3922,15 @@ FrameTree* WebContentsImpl::CreateNewWindow(
+   // objects.
+   create_params.renderer_initiated_creation = !is_new_browsing_instance;
+ 
++  if (delegate_) {
++    delegate_->GetCustomWebContentsView(this,
++                                        params.target_url,
++                                        render_process_id,
++                                        opener->GetRoutingID(),
++                                        &create_params.view,
++                                        &create_params.delegate_view);
++  }
++
+   std::unique_ptr<WebContentsImpl> new_contents;
+   if (!is_guest) {
+     create_params.context = view_->GetNativeView();
+@@ -7773,6 +7792,9 @@ void WebContentsImpl::SetFocusedFrame(FrameTreeNode* node,
+     // frames).
+     SetFocusedFrameTree(node->frame_tree());
+   }
++
++  observers_.NotifyObservers(&WebContentsObserver::OnFrameFocused,
++                             node->current_frame_host());
+ }
+ 
+ void WebContentsImpl::DidCallFocus() {
+diff --git content/public/browser/web_contents.h content/public/browser/web_contents.h
+index e82a5b71eb8a6..34a2f19d8ddca 100644
+--- content/public/browser/web_contents.h
++++ content/public/browser/web_contents.h
+@@ -93,10 +93,12 @@ class BrowserContext;
+ class BrowserPluginGuestDelegate;
+ class RenderFrameHost;
+ class RenderViewHost;
++class RenderViewHostDelegateView;
+ class RenderWidgetHostView;
+ class ScreenOrientationDelegate;
+ class SiteInstance;
+ class WebContentsDelegate;
++class WebContentsView;
+ class WebUI;
+ struct DropData;
+ struct MHTMLGenerationParams;
+@@ -234,6 +236,10 @@ class WebContents : public PageNavigator,
+     network::mojom::WebSandboxFlags starting_sandbox_flags =
+         network::mojom::WebSandboxFlags::kNone;
+ 
++    // Optionally specify the view and delegate view.
++    content::WebContentsView* view = nullptr;
++    content::RenderViewHostDelegateView* delegate_view = nullptr;
++
+     // Value used to set the last time the WebContents was made active, this is
+     // the value that'll be returned by GetLastActiveTime(). If this is left
+     // default initialized then the value is not passed on to the WebContents
+diff --git content/public/browser/web_contents_delegate.h content/public/browser/web_contents_delegate.h
+index 348dcde05d71e..871f0e0e22eb6 100644
+--- content/public/browser/web_contents_delegate.h
++++ content/public/browser/web_contents_delegate.h
+@@ -57,9 +57,11 @@ class EyeDropperListener;
+ class FileSelectListener;
+ class JavaScriptDialogManager;
+ class RenderFrameHost;
++class RenderViewHostDelegateView;
+ class RenderWidgetHost;
+ class SessionStorageNamespace;
+ class SiteInstance;
++class WebContentsView;
+ struct ContextMenuParams;
+ struct DropData;
+ struct MediaPlayerWatchTime;
+@@ -338,6 +340,14 @@ class CONTENT_EXPORT WebContentsDelegate {
+       const StoragePartitionConfig& partition_config,
+       SessionStorageNamespace* session_storage_namespace);
+ 
++  virtual void GetCustomWebContentsView(
++      WebContents* web_contents,
++      const GURL& target_url,
++      int opener_render_process_id,
++      int opener_render_frame_id,
++      content::WebContentsView** view,
++      content::RenderViewHostDelegateView** delegate_view) {}
++
+   // Notifies the delegate about the creation of a new WebContents. This
+   // typically happens when popups are created.
+   virtual void WebContentsCreated(WebContents* source_contents,
+diff --git content/public/browser/web_contents_observer.h content/public/browser/web_contents_observer.h
+index 9ee3b74460c00..c6497c7059d54 100644
+--- content/public/browser/web_contents_observer.h
++++ content/public/browser/web_contents_observer.h
+@@ -209,6 +209,9 @@ class CONTENT_EXPORT WebContentsObserver {
+   virtual void OnCaptureHandleConfigUpdate(
+       const blink::mojom::CaptureHandleConfig& config) {}
+ 
++  // This method is invoked when a RenderWidget is created.
++  virtual void RenderWidgetCreated(RenderWidgetHost* render_widget_host) {}
++
+   // This method is invoked when the RenderView of the current RenderViewHost
+   // is ready, e.g. because we recreated it after a crash.
+   virtual void RenderViewReady() {}
+@@ -772,6 +775,10 @@ class CONTENT_EXPORT WebContentsObserver {
+   // WebContents has gained/lost focus.
+   virtual void OnFocusChangedInPage(FocusedNodeDetails* details) {}
+ 
++  // Notification that |render_frame_host| for this WebContents has gained
++  // focus.
++  virtual void OnFrameFocused(RenderFrameHost* render_frame_host) {}
++
+   // Notifies that the manifest URL for the main frame changed to
+   // |manifest_url|. This will be invoked when a document with a manifest loads
+   // or when the manifest URL changes (possibly to nothing). It is not invoked
